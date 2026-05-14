@@ -209,22 +209,29 @@ if (-not $UsePlink) {
         exit
     }
 
-    Write-Host ">>> ssh(OpenSSH)를 사용하여 수동 연결을 시도합니다." -ForegroundColor Yellow
-    # OpenSSH 사용 시 KeepAlive 및 백그라운드 옵션
-    $sshArgs = "-N -p $WorkPCPort -D $SocksPort " + `
-        "-L ${LocalSshPort1}:${RemoteSshHost1}:${RemoteSshPort1} " + `
-        "-L ${LocalSshPort2}:${RemoteSshHost2}:${RemoteSshPort2} " + `
-        "-L ${LocalSshPort3}:${RemoteSshHost3}:${RemoteSshPort3} " + `
-        "-L ${LocalSshPort4}:${RemoteSshHost4}:${RemoteSshPort4} " + `
-        "-L ${LocalSshPort5}:${RemoteSshHost5}:${RemoteSshPort5} " + `
-        "-L ${LocalSshPort6}:${RemoteSshHost6}:${RemoteSshPort6} " + `
-        "-o ServerAliveInterval=30 -o ServerAliveCountMax=3 " + `
-        "-o StrictHostKeyChecking=accept-new " + `
+    Write-Host ">>> ssh(OpenSSH)를 사용하여 대체 연결을 시도합니다." -ForegroundColor Yellow
+    Write-Host ">>> [안내] 보안 정책으로 인해 plink가 차단되었습니다." -ForegroundColor Cyan
+    Write-Host ">>> [안내] 아래에 암호 입력 프롬프트가 나타나면 업무용 PC 암호를 다시 한 번 입력해 주세요." -ForegroundColor Cyan
+    
+    # OpenSSH 사용 시 KeepAlive 및 백그라운드 전환(-f) 옵션
+    $sshArgsArray = @(
+        "-f", "-N", "-p", "$WorkPCPort", "-D", "$SocksPort",
+        "-L", "${LocalSshPort1}:${RemoteSshHost1}:${RemoteSshPort1}",
+        "-L", "${LocalSshPort2}:${RemoteSshHost2}:${RemoteSshPort2}",
+        "-L", "${LocalSshPort3}:${RemoteSshHost3}:${RemoteSshPort3}",
+        "-L", "${LocalSshPort4}:${RemoteSshHost4}:${RemoteSshPort4}",
+        "-L", "${LocalSshPort5}:${RemoteSshHost5}:${RemoteSshPort5}",
+        "-L", "${LocalSshPort6}:${RemoteSshHost6}:${RemoteSshPort6}",
+        "-o", "ServerAliveInterval=30",
+        "-o", "ServerAliveCountMax=3",
+        "-o", "StrictHostKeyChecking=accept-new",
         "${WorkPCUser}@${WorkPC}"
+    )
     
-    Start-Process ssh -ArgumentList $sshArgs -NoNewWindow
+    # ssh를 직접 실행하여 현재 콘솔에서 정상적으로 암호 입력을 받음
+    & ssh @sshArgsArray
     
-    Write-Host ">>> 터널이 열리기를 기다리는 중..." -NoNewline
+    Write-Host ">>> 터널 상태를 확인하는 중..." -NoNewline
     $timeout = 15
     while ($timeout -gt 0 -and -not (Test-Port $SocksPort)) {
         Write-Host "." -NoNewline
