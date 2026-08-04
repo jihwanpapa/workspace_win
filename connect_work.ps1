@@ -2,6 +2,12 @@
 $OutputEncoding = [System.Text.Encoding]::UTF8
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
+# 기존 실행 중인 SSH 및 Plink 프로세스 강제 종료 (포트 활성화 여부 관계 없이 정리)
+Write-Host ">>> 기존 SSH 및 Plink 프로세스를 정리합니다..." -ForegroundColor Cyan
+Stop-Process -Name ssh -Force -ErrorAction SilentlyContinue
+Stop-Process -Name plink -Force -ErrorAction SilentlyContinue
+Start-Sleep -Seconds 1
+
 <#
 .SYNOPSIS
     업무용 PC(10.110.1.182)를 경유하여 내부 자원에 접속하기 위한 SSH 터널링 스크립트입니다.
@@ -86,29 +92,47 @@ $UsedPorts = $AllPorts | Where-Object { Test-Port $_ }
 
 if ($UsedPorts) {
     Write-Host "![주의] 이미 일부 포트($($UsedPorts -join ', '))가 사용 중입니다. 관련 프로세스를 종료합니다..." -ForegroundColor Yellow
-    foreach ($port in $UsedPorts) {
-        $connections = Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue
-        if ($connections) {
-            $pids = $connections.OwningProcess | Select-Object -Unique
-            foreach ($pidNum in $pids) {
-                if ($pidNum -ne 0 -and $pidNum -ne $PID) {
-                    Write-Host "    - 포트 ${port}를 사용 중인 프로세스(PID: $pidNum) 종료 중..."
-                    Stop-Process -Id $pidNum -Force -ErrorAction SilentlyContinue
+    
+    $maxRetries = 3
+    $retryCount = 0
+    $portsClosed = $false
+    
+    while (-not $portsClosed -and $retryCount -lt $maxRetries) {
+        $retryCount++
+        Write-Host ">>> 시도 ${retryCount}/${maxRetries}: 포트 정리 중..." -ForegroundColor Cyan
+        
+        foreach ($port in $UsedPorts) {
+            $connections = Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue
+            if ($connections) {
+                $pids = $connections.OwningProcess | Select-Object -Unique
+                foreach ($pidNum in $pids) {
+                    if ($pidNum -ne 0 -and $pidNum -ne $PID) {
+                        Write-Host "    - 포트 ${port}를 사용 중인 프로세스(PID: $pidNum) 종료 중..."
+                        Stop-Process -Id $pidNum -Force -ErrorAction SilentlyContinue
+                    }
                 }
             }
         }
+        
+        # 프로세스 종료 대기 (시도 횟수에 따라 대기 시간 증가)
+        $waitTime = 2 * $retryCount
+        Start-Sleep -Seconds $waitTime
+        
+        # 다시 확인
+        $UsedPorts = $AllPorts | Where-Object { Test-Port $_ }
+        if (-not $UsedPorts) {
+            $portsClosed = $true
+            Write-Host ">>> 포트 정리가 완료되었습니다. 연결을 계속 진행합니다." -ForegroundColor Green
+        }
+        else {
+            Write-Host ">>> 포트가 여전히 사용 중입니다. 재시도합니다..." -ForegroundColor Yellow
+        }
     }
     
-    # 프로세스 종료 대기
-    Start-Sleep -Seconds 2
-    
-    # 다시 확인
-    $UsedPorts = $AllPorts | Where-Object { Test-Port $_ }
-    if ($UsedPorts) {
+    if (-not $portsClosed) {
         Write-Host "![오류] 포트를 닫지 못했습니다. 시스템을 재부팅하거나 수동으로 프로세스를 종료해 주세요." -ForegroundColor Red
+        Write-Host ">>> 수동 종료 명령어: Stop-Process -Name plink -Force" -ForegroundColor Yellow
         exit
-    } else {
-        Write-Host ">>> 포트 정리가 완료되었습니다. 연결을 계속 진행합니다." -ForegroundColor Green
     }
 }
 
@@ -124,12 +148,12 @@ if ($UsePlink) {
     $plinkArgs = @("-P", "$WorkPCPort", "-N", "-D", "$SocksPort")
 
     $plinkArgs += @(
-        "-L", "${LocalSshPort1}:${RemoteSshHost1}:${RemoteSshPort1}",
-        "-L", "${LocalSshPort2}:${RemoteSshHost2}:${RemoteSshPort2}",
-        "-L", "${LocalSshPort3}:${RemoteSshHost3}:${RemoteSshPort3}",
-        "-L", "${LocalSshPort4}:${RemoteSshHost4}:${RemoteSshPort4}",
-        "-L", "${LocalSshPort5}:${RemoteSshHost5}:${RemoteSshPort5}",
-        "-L", "${LocalSshPort6}:${RemoteSshHost6}:${RemoteSshPort6}"
+        "-L", "0.0.0.0:${LocalSshPort1}:${RemoteSshHost1}:${RemoteSshPort1}",
+        "-L", "0.0.0.0:${LocalSshPort2}:${RemoteSshHost2}:${RemoteSshPort2}",
+        "-L", "0.0.0.0:${LocalSshPort3}:${RemoteSshHost3}:${RemoteSshPort3}",
+        "-L", "0.0.0.0:${LocalSshPort4}:${RemoteSshHost4}:${RemoteSshPort4}",
+        "-L", "0.0.0.0:${LocalSshPort5}:${RemoteSshHost5}:${RemoteSshPort5}",
+        "-L", "0.0.0.0:${LocalSshPort6}:${RemoteSshHost6}:${RemoteSshPort6}"
     )
 
     if ($WorkPCPassword) {
@@ -164,7 +188,8 @@ if ($UsePlink) {
     # 프로세스 실행 (AppLocker 등 정책 차단 대비 try-catch)
     try {
         $process = Start-Process plink -ArgumentList $plinkArgs -WindowStyle Hidden -PassThru -ErrorAction Stop
-    } catch {
+    }
+    catch {
         Write-Host "![오류] plink 실행이 차단되었거나 실패했습니다: $($_.Exception.Message)" -ForegroundColor Red
         Write-Host ">>> ssh(OpenSSH)로 대체 접속을 시도합니다..." -ForegroundColor Yellow
         $process = $null
@@ -211,42 +236,29 @@ if (-not $UsePlink) {
 
     Write-Host ">>> ssh(OpenSSH)를 사용하여 대체 연결을 시도합니다." -ForegroundColor Yellow
     Write-Host ">>> [안내] 보안 정책으로 인해 plink가 차단되었습니다." -ForegroundColor Cyan
-    Write-Host ">>> [안내] 아래에 암호 입력 프롬프트가 나타나면 업무용 PC 암호를 다시 한 번 입력해 주세요." -ForegroundColor Cyan
+    Write-Host ">>> [안내] 아래에 암호 입력 프롬프트가 나타나면 업무용 PC 암호를 입력해 주세요." -ForegroundColor Cyan
+    Write-Host ">>> [필독] 로그인 성공 시 화면에 성공 메시지가 나타나지 않고 멈춰 있는 것(블로킹)이 정상적인 연결 상태입니다!" -ForegroundColor Green
+    Write-Host ">>>        아무 글자도 출력되지 않더라도 터널은 백그라운드에서 동작 중이므로 이 창을 닫지 마세요. (종료: Ctrl+C)" -ForegroundColor Green
     
-    # OpenSSH 사용 시 KeepAlive 및 백그라운드 전환(-f) 옵션
+    # OpenSSH 사용 시 KeepAlive 옵션 (-f 제외: Windows OpenSSH는 백그라운드 전환을 지원하지 않음)
     $sshArgsArray = @(
-        "-f", "-N", "-p", "$WorkPCPort", "-D", "$SocksPort",
-        "-L", "${LocalSshPort1}:${RemoteSshHost1}:${RemoteSshPort1}",
-        "-L", "${LocalSshPort2}:${RemoteSshHost2}:${RemoteSshPort2}",
-        "-L", "${LocalSshPort3}:${RemoteSshHost3}:${RemoteSshPort3}",
-        "-L", "${LocalSshPort4}:${RemoteSshHost4}:${RemoteSshPort4}",
-        "-L", "${LocalSshPort5}:${RemoteSshHost5}:${RemoteSshPort5}",
-        "-L", "${LocalSshPort6}:${RemoteSshHost6}:${RemoteSshPort6}",
+        "-N", "-p", "$WorkPCPort", "-D", "$SocksPort",
+        "-L", "0.0.0.0:${LocalSshPort1}:${RemoteSshHost1}:${RemoteSshPort1}",
+        "-L", "0.0.0.0:${LocalSshPort2}:${RemoteSshHost2}:${RemoteSshPort2}",
+        "-L", "0.0.0.0:${LocalSshPort3}:${RemoteSshHost3}:${RemoteSshPort3}",
+        "-L", "0.0.0.0:${LocalSshPort4}:${RemoteSshHost4}:${RemoteSshPort4}",
+        "-L", "0.0.0.0:${LocalSshPort5}:${RemoteSshHost5}:${RemoteSshPort5}",
+        "-L", "0.0.0.0:${LocalSshPort6}:${RemoteSshHost6}:${RemoteSshPort6}",
         "-o", "ServerAliveInterval=30",
         "-o", "ServerAliveCountMax=3",
         "-o", "StrictHostKeyChecking=accept-new",
         "${WorkPCUser}@${WorkPC}"
     )
     
-    # ssh를 직접 실행하여 현재 콘솔에서 정상적으로 암호 입력을 받음
-    & ssh @sshArgsArray
-    
-    Write-Host ">>> 터널 상태를 확인하는 중..." -NoNewline
-    $timeout = 15
-    while ($timeout -gt 0 -and -not (Test-Port $SocksPort)) {
-        Write-Host "." -NoNewline
-        Start-Sleep -Seconds 1
-        $timeout--
-    }
+    # 최하단에 있던 가이드 및 성공 메시지를 ssh 실행 전에 미리 출력해 줍니다.
     Write-Host ""
-}
-
-# 3. 최종 상태 확인
-if (Test-Port $SocksPort) {
-    Write-Host ">>> [성공] 업무 터널이 활성화되었습니다!" -ForegroundColor Green
-    Write-Host ">>> SOCKS5 프록시: localhost:$SocksPort"
-    Write-Host "------------------------------------------------------------"
-    Write-Host "터널 상태 (Local Port -> Remote Host):" -ForegroundColor Cyan
+    Write-Host ">>> [안내] SSH 터널이 활성화되면 아래 포트들이 매핑됩니다:" -ForegroundColor Green
+    Write-Host "    SOCKS5 프록시: localhost:$SocksPort"
     Write-Host "    $LocalSshPort1 -> $RemoteSshHost1 (stg-kr)"
     Write-Host "    $LocalSshPort2 -> $RemoteSshHost2 (stg-us)"
     Write-Host "    $LocalSshPort3 -> $RemoteSshHost3 (prd-kr)"
@@ -257,9 +269,32 @@ if (Test-Port $SocksPort) {
     Write-Host ">>> [설정 가이드] 특정 도메인만 프록시 사용하기" -ForegroundColor Yellow
     Write-Host "    1. 브라우저 설정에서 '자동 프록시 구성(PAC)'을 찾아 선택하세요."
     Write-Host "    2. 다음 경로를 입력하세요: file://C:/Dev/workspace/proxy.pac"
-    Write-Host "    3. 이제 *.mcsvc.samsung.com 접속 시에만 터널을 사용합니다."
     Write-Host "------------------------------------------------------------"
+    Write-Host ""
+    
+    # ssh를 직접 실행하여 현재 콘솔에서 정상적으로 암호 입력을 받음
+    & ssh @sshArgsArray
 }
 else {
-    Write-Host "![실패] 터널 연결에 실패했습니다. 수동으로 확인해 주세요." -ForegroundColor Red
+    # 3. 최종 상태 확인 (plink 사용 시에만 기존처럼 후속 상태 체크 진행)
+    if (Test-Port $SocksPort) {
+        Write-Host ">>> [성공] 업무 터널이 활성화되었습니다!" -ForegroundColor Green
+        Write-Host ">>> SOCKS5 프록시: localhost:$SocksPort"
+        Write-Host "------------------------------------------------------------"
+        Write-Host "터널 상태 (Local Port -> Remote Host):" -ForegroundColor Cyan
+        Write-Host "    $LocalSshPort1 -> $RemoteSshHost1 (stg-kr)"
+        Write-Host "    $LocalSshPort2 -> $RemoteSshHost2 (stg-us)"
+        Write-Host "    $LocalSshPort3 -> $RemoteSshHost3 (prd-kr)"
+        Write-Host "    $LocalSshPort4 -> $RemoteSshHost4 (prd-us)"
+        Write-Host "    $LocalSshPort5 -> $RemoteSshHost5 (prd-cn)"
+        Write-Host "    $LocalSshPort6 -> $RemoteSshHost6 (dev)"
+        Write-Host "------------------------------------------------------------"
+        Write-Host ">>> [설정 가이드] 특정 도메인만 프록시 사용하기" -ForegroundColor Yellow
+        Write-Host "    1. 브라우저 설정에서 '자동 프록시 구성(PAC)'을 찾아 선택하세요."
+        Write-Host "    2. 다음 경로를 입력하세요: file://C:/Dev/workspace/proxy.pac"
+        Write-Host "------------------------------------------------------------"
+    }
+    else {
+        Write-Host "![실패] 터널 연결에 실패했습니다. 수동으로 확인해 주세요." -ForegroundColor Red
+    }
 }
