@@ -1,0 +1,36 @@
+#!/usr/bin/env expect
+
+set timeout 30
+set USER $env(SSH_USER)
+set PASS $env(SSH_PASS)
+set PORT $env(PORT)
+set OTP $env(OTP)
+
+spawn ssh -t -p $PORT -o StrictHostKeyChecking=accept-new $USER@127.0.0.1
+
+expect {
+    -nocase "password:" {
+        send "$PASS\r"
+        exp_continue
+    }
+    -nocase "first factor:" {
+        send "$PASS\r"
+        exp_continue
+    }
+    -re "(?i)(Second Factor:|Verification code:|OTP:|MFA:|Token:)" {
+        send "$OTP\r"
+        exp_continue
+    }
+    -re {[]$#>%] ?} {
+        puts "\n\[Success\] Login completed!\n"
+        interact
+    }
+    timeout {
+        puts "\n\[Error\] Connection timed out.\n"
+        exit 1
+    }
+    eof {
+        puts "\n\[Error\] Connection closed unexpectedly.\n"
+        exit 1
+    }
+}
